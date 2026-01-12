@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>反射パズル：ステージ15修正版</title>
+    <style>
+        body { background-color: #0d0d0d; color: white; font-family: 'Courier New', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; user-select: none; }
+        canvas { background-color: #1a1a2e; border: 2px solid #00d2ff; border-radius: 8px; cursor: crosshair; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
+        .ui { width: 600px; text-align: center; margin-bottom: 10px; display: flex; justify-content: space-between; }
+        .level-title { font-size: 1.5rem; color: #00d2ff; font-weight: bold; text-shadow: 0 0 10px #00d2ff; }
+        .status { font-size: 1rem; color: #f1c40f; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0; } 100% { opacity: 1; } }
+        .warning { color: #ff4757; animation: blink 0.5s infinite; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="ui">
+        <div id="levelLabel" class="level-title">REFLECTOR</div>
+        <div id="statusLabel" class="status">CLICK TO START</div>
+    </div>
+    <canvas id="gameCanvas" width="600" height="450"></canvas>
+
+    <script>
+        const CANVAS_WIDTH = 600;
+        const CANVAS_HEIGHT = 450;
+        const SUB_STEPS = 8;
+
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        const statusLabel = document.getElementById("statusLabel");
+        const levelLabel = document.getElementById("levelLabel");
+
+        class SoundManager {
+            constructor() { this.ctx = null; }
+            init() { if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+            play(type) {
+                if (!this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.connect(gain); gain.connect(this.ctx.destination);
+                const now = this.ctx.currentTime;
+                
+                if (type === 'hit') {
+                    osc.type = 'sine'; osc.frequency.setValueAtTime(800, now); osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+                    gain.gain.setValueAtTime(0.1, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                    osc.start(now); osc.stop(now + 0.1);
+                } else if (type === 'destroy') {
+                    osc.type = 'square'; osc.frequency.setValueAtTime(200, now); osc.frequency.exponentialRampToValueAtTime(50, now + 0.3);
+                    gain.gain.setValueAtTime(0.2, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                    osc.start(now); osc.stop(now + 0.3);
+                } else if (type === 'launch') {
+                    osc.type = 'triangle'; osc.frequency.setValueAtTime(400, now); osc.frequency.linearRampToValueAtTime(1000, now + 0.1);
+                    gain.gain.setValueAtTime(0.1, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+                    osc.start(now); osc.stop(now + 0.2);
+                } else if (type === 'clear') {
+                    osc.type = 'sine'; osc.frequency.setValueAtTime(500, now); osc.frequency.setValueAtTime(1000, now + 0.1); osc.frequency.setValueAtTime(1500, now + 0.2);
+                    gain.gain.setValueAtTime(0.1, now); gain.gain.linearRampToValueAtTime(0, now + 0.6);
+                    osc.start(now); osc.stop(now + 0.6);
+                } else if (type === 'error') {
+                    osc.type = 'sawtooth'; osc.frequency.setValueAtTime(150, now); osc.frequency.linearRampToValueAtTime(100, now + 0.3);
+                    gain.gain.setValueAtTime(0.3, now); gain.gain.linearRampToValueAtTime(0, now + 0.3);
+                    osc.start(now); osc.stop(now + 0.3);
+                }
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x; this.y = y;
+                this.vx = (Math.random() - 0.5) * 10; this.vy = (Math.random() - 0.5) * 10;
+                this.size = Math.random() * 4 + 2; this.life = 1.0; this.color = color;
+            }
+            update() { this.x += this.vx; this.y += this.vy; this.life -= 0.04; return this.life > 0; }
+            draw(ctx) {
+                ctx.globalAlpha = this.life; ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.size, this.size); ctx.globalAlpha = 1.0;
+            }
+        }
+
+        class GameObject {
+            constructor(x, y, w, h, type, shape = 'rect') {
+                this.x = x; this.y = y; this.w = w; this.h = h;
+                this.r = w / 2; 
+                this.type = type; this.shape = shape; this.alive = true;
+            }
+            draw(ctx) {
+                if (this.type === 'target' && !this.alive) return;
+                ctx.fillStyle = (this.type === 'obstacle') ? "#46466e" : "#f1c40f";
+                ctx.shadowBlur = (this.type === 'obstacle') ? 10 : 20; ctx.shadowColor = ctx.fillStyle;
+                
+                if (this.shape === 'circle') {
+                    ctx.beginPath(); ctx.arc(this.x + this.r, this.y + this.r, this.r, 0, Math.PI * 2); ctx.fill();
+                    if (this.type === 'obstacle') { ctx.strokeStyle = "#00d2ff"; ctx.stroke(); }
+                } else {
+                    ctx.fillRect(this.x, this.y, this.w, this.h);
+                    if (this.type === 'obstacle') { ctx.strokeStyle = "#00d2ff"; ctx.strokeRect(this.x, this.y, this.w, this.h); }
+                }
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        class Ball {
+            constructor(soundManager) { this.sm = soundManager; this.reset(); }
+            
+            reset() { 
+                this.x = 300; this.y = 420; this.vx = 0; this.vy = 0; this.r = 8; this.active = false; 
+                this.lastCheckX = 300; this.lastCheckY = 420; this.checkTimer = 0; 
+            }
+
+            launch(mouseX, mouseY, obstacles) {
+                if (this.active) return;
+                const angle = Math.atan2(mouseY - this.y, mouseX - this.x);
+                this.vx = Math.cos(angle) * 10; this.vy = Math.sin(angle) * 10;
+                this.active = true; this.sm.play('launch');
+                this.lastCheckX = this.x; this.lastCheckY = this.y; this.checkTimer = 0;
+            }
+
+            update(obstacles, targets, onTargetDestroy, onMiss, onDeadlock) {
+                if (!this.active) return;
+
+                this.checkTimer++;
+                if (this.checkTimer > 60) {
+                    const dx = this.x - this.lastCheckX;
+                    const dy = this.y - this.lastCheckY;
+                    if (Math.sqrt(dx*dx + dy*dy) < 5) {
+                        onDeadlock();
+                        return;
+                    }
+                    this.lastCheckX = this.x; this.lastCheckY = this.y; this.checkTimer = 0;
+                }
+
+                const sVx = this.vx / SUB_STEPS, sVy = this.vy / SUB_STEPS;
+                for (let i = 0; i < SUB_STEPS; i++) {
+                    this.x += sVx; this.y += sVy;
+                    
+                    if (this.x < this.r) { this.x = this.r; this.vx = Math.abs(this.vx); this.sm.play('hit'); break; }
+                    if (this.x > CANVAS_WIDTH - this.r) { this.x = CANVAS_WIDTH - this.r; this.vx = -Math.abs(this.vx); this.sm.play('hit'); break; }
+                    if (this.y < this.r) { this.y = this.r; this.vy = Math.abs(this.vy); this.sm.play('hit'); break; }
+                    if (this.y > CANVAS_HEIGHT) { onMiss(); return; }
+
+                    let collided = false;
+                    for (let o of obstacles) {
+                        if (this.isColliding(o)) { this.resolve(o); this.sm.play('hit'); collided = true; break; }
+                    }
+                    if (collided) break;
+
+                    for (let t of targets) {
+                        if (t.alive && this.isColliding(t)) { t.alive = false; onTargetDestroy(t); this.sm.play('destroy'); break; }
+                    }
+                }
+            }
+
+            isColliding(o) {
+                if (o.shape === 'circle') {
+                    const dx = this.x - (o.x + o.r), dy = this.y - (o.y + o.r);
+                    return dx*dx + dy*dy < (this.r + o.r)**2;
+                }
+                return this.x + this.r > o.x && this.x - this.r < o.x + o.w && this.y + this.r > o.y && this.y - this.r < o.y + o.h;
+            }
+
+            resolve(o) {
+                let nx, ny, dist;
+                if (o.shape === 'circle') {
+                    const dx = this.x - (o.x + o.r), dy = this.y - (o.y + o.r);
+                    dist = Math.sqrt(dx*dx + dy*dy);
+                    nx = dx / dist; ny = dy / dist;
+                    const overlap = (this.r + o.r) - dist;
+                    this.x += nx * (overlap + 0.01); this.y += ny * (overlap + 0.01);
+                } else {
+                    const cx = Math.max(o.x, Math.min(this.x, o.x + o.w)), cy = Math.max(o.y, Math.min(this.y, o.y + o.h));
+                    const dx = this.x - cx, dy = this.y - cy;
+                    dist = Math.sqrt(dx*dx + dy*dy) || 0.1;
+                    nx = dx / dist; ny = dy / dist;
+                    this.x += nx * (this.r - dist + 0.01); this.y += ny * (this.r - dist + 0.01);
+                }
+                const dot = this.vx * nx + this.vy * ny;
+                if (dot < 0) { this.vx -= 2 * dot * nx; this.vy -= 2 * dot * ny; }
+            }
+
+            draw(ctx) {
+                ctx.shadowBlur = 15; ctx.shadowColor = "#ff4757"; ctx.fillStyle = "#ff4757";
+                ctx.beginPath(); ctx.arc(this.x, this.y, this.r, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur = 0;
+            }
+        }
+
+        class GameApp {
+            constructor() {
+                this.soundManager = new SoundManager();
+                this.ball = new Ball(this.soundManager);
+                this.state = "TITLE"; this.currentLevel = 0;
+                
+                this.stages = [
+                    { title: "STAGE 1: BASIC", obs: [{x:100, y:250, w:400, h:20}], tar: [{x:275, y:50, w:50, h:50}] },
+                    { title: "STAGE 2: SHELTER", obs: [{x:200, y:50, w:20, h:100}, {x:380, y:50, w:20, h:100}, {x:200, y:150, w:200, h:20}], tar: [{x:275, y:70, w:50, h:50}] },
+                    { title: "STAGE 3: ZIGZAG", obs: [{x:0, y:300, w:500, h:20}, {x:100, y:150, w:500, h:20}], tar: [{x:520, y:40, w:40, h:40}] },
+                    { title: "STAGE 4: DOUBLE", obs: [{x:0, y:100, w:100, h:20}, {x:500, y:100, w:100, h:20}, {x:150, y:220, w:300, h:20}, {x:290, y:0, w:20, h:100}], tar: [{x:20, y:20, w:40, h:40}] },
+                    { title: "STAGE 5: PACHINKO", obs: [{x:100, y:100, w:40, h:40}, {x:280, y:100, w:40, h:40}, {x:460, y:100, w:40, h:40}, {x:190, y:200, w:40, h:40}, {x:370, y:200, w:40, h:40}, {x:100, y:300, w:40, h:40}, {x:280, y:300, w:40, h:40}, {x:460, y:300, w:40, h:40}], tar: [{x:280, y:30, w:40, h:40}] },
+                    { title: "STAGE 6: BUNKER", obs: [{x:150, y:200, w:20, h:100}, {x:430, y:200, w:20, h:100}, {x:150, y:200, w:100, h:20}, {x:350, y:200, w:100, h:20}, {x:150, y:300, w:300, h:20}], tar: [{x:280, y:250, w:40, h:40}] },
+                    { title: "STAGE 7: KEEPER", obs: [{x:0, y:150, w:250, h:20}, {x:350, y:150, w:250, h:20}, {x:290, y:250, w:20, h:100}], tar: [{x:280, y:50, w:40, h:40}] },
+                    { title: "STAGE 8: X-GATE", obs: [{x:150, y:150, w:20, h:150}, {x:430, y:150, w:20, h:150}, {x:150, y:150, w:100, h:20}, {x:350, y:150, w:100, h:20}, {x:150, y:280, w:300, h:20}, {x:290, y:170, w:20, h:30}, {x:50, y:350, w:100, h:20}, {x:450, y:350, w:100, h:20}], tar: [{x:285, y:220, w:30, h:30}] },
+                    { title: "STAGE 9: ORBIT", obs: [{x:100, y:100, w:80, h:80, shape:'circle'}, {x:420, y:100, w:80, h:80, shape:'circle'}, {x:260, y:220, w:80, h:80, shape:'circle'}], tar: [{x:275, y:50, w:50, h:50}] },
+                    { title: "STAGE 10: PINBALL", obs: [{x:0, y:100, w:200, h:20}, {x:400, y:100, w:200, h:20}, {x:200, y:300, w:200, h:20}, {x:100, y:200, w:40, h:40, shape:'circle'}, {x:460, y:200, w:40, h:40, shape:'circle'}], tar: [{x:280, y:40, w:40, h:40}] },
+                    { title: "STAGE 11: ECLIPSE", obs: [{x:250, y:150, w:100, h:100, shape:'circle'}, {x:100, y:300, w:20, h:100}, {x:480, y:300, w:20, h:100}], tar: [{x:275, y:80, w:50, h:50}] },
+                    { title: "STAGE 12: SLALOM", obs: [{x:150, y:100, w:20, h:200}, {x:300, y:0, w:20, h:200}, {x:450, y:100, w:20, h:200}], tar: [{x:520, y:50, w:40, h:40}] },
+                    { title: "STAGE 13: VORTEX", obs: [{x:200, y:100, w:60, h:60, shape:'circle'}, {x:340, y:100, w:60, h:60, shape:'circle'}, {x:270, y:220, w:60, h:60, shape:'circle'}, {x:150, y:300, w:40, h:40}, {x:410, y:300, w:40, h:40}], tar: [{x:280, y:150, w:40, h:40}] },
+                    { title: "STAGE 14: IRON WALL", obs: [{x:50, y:200, w:500, h:40}, {x:150, y:200, w:20, h:40, shape:'circle'}, {x:300, y:200, w:20, h:40, shape:'circle'}, {x:450, y:200, w:20, h:40, shape:'circle'}], tar: [{x:280, y:50, w:40, h:40}] },
+                    
+                    // ★STAGE 15 修正済み: 完全に塞がっていた壁を修正し、上部に隙間を作成★
+                    { 
+                        title: "STAGE 15: THE END", 
+                        obs: [
+                            // 囲いの上部（隙間を開けるため分割）
+                            {x:200, y:200, w:80, h:20}, {x:320, y:200, w:80, h:20}, 
+                            // 囲いの左・右・下
+                            {x:200, y:200, w:20, h:200}, {x:380, y:200, w:20, h:200}, {x:200, y:380, w:200, h:20},
+                            // 妨害役
+                            {x:290, y:100, w:20, h:100}, 
+                            {x:100, y:100, w:60, h:60, shape:'circle'}, {x:440, y:100, w:60, h:60, shape:'circle'}
+                        ], 
+                        tar: [{x:285, y:285, w:30, h:30}] 
+                    }
+                ];
+                this.bind(); this.loop();
+            }
+            bind() {
+                canvas.addEventListener("mousemove", e => { const r = canvas.getBoundingClientRect(); this.mouseX = e.clientX - r.left; this.mouseY = e.clientY - r.top; });
+                canvas.addEventListener("mousedown", () => {
+                    if (this.state === "TITLE") { this.soundManager.init(); this.load(0); this.state = "PLAYING"; }
+                    else if (this.state === "PLAYING") this.ball.launch(this.mouseX, this.mouseY, this.obstacles);
+                    else if (this.state === "CLEAR") this.load(0);
+                });
+            }
+            load(idx) {
+                if (idx >= this.stages.length) { this.state = "CLEAR"; this.soundManager.play('clear'); return; }
+                this.currentLevel = idx; const d = this.stages[idx];
+                levelLabel.innerText = d.title; statusLabel.innerText = "AIM & SHOOT";
+                statusLabel.classList.remove("warning");
+                this.obstacles = d.obs.map(o => new GameObject(o.x, o.y, o.w, o.h, 'obstacle', o.shape));
+                this.targets = d.tar.map(t => new GameObject(t.x, t.y, t.w, t.h, 'target'));
+                this.particles = []; this.ball.reset();
+            }
+            update() {
+                if (this.state !== "PLAYING") return;
+                this.particles = this.particles.filter(p => p.update());
+                this.ball.update(
+                    this.obstacles, this.targets, 
+                    (t) => {
+                        for(let i=0; i<20; i++) this.particles.push(new Particle(t.x+t.w/2, t.y+t.h/2, "#f1c40f"));
+                        setTimeout(() => { if (this.targets.every(t => !t.alive)) { this.soundManager.play('clear'); this.load(this.currentLevel+1); } else this.ball.reset(); }, 200);
+                    }, 
+                    () => this.ball.reset(),
+                    () => {
+                        statusLabel.innerText = "STUCK DETECTED! RESETTING...";
+                        statusLabel.classList.add("warning");
+                        this.soundManager.play('error');
+                        this.ball.active = false;
+                        setTimeout(() => {
+                            this.ball.reset();
+                            statusLabel.innerText = "AIM & SHOOT";
+                            statusLabel.classList.remove("warning");
+                        }, 1000);
+                    }
+                );
+            }
+            draw() {
+                ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                if (this.state === "TITLE") { ctx.fillStyle="white"; ctx.textAlign="center"; ctx.fillText("CLICK TO START", 300, 225); return; }
+                if (this.state === "CLEAR") { ctx.fillStyle="#f1c40f"; ctx.font="30px Courier New"; ctx.textAlign="center"; ctx.fillText("YOU ARE THE CHAMPION", 300, 225); return; }
+                this.obstacles.forEach(o => o.draw(ctx)); this.targets.forEach(t => t.draw(ctx)); this.particles.forEach(p => p.draw(ctx));
+                if (this.ball.active) this.ball.draw(ctx);
+                else { ctx.setLineDash([4,8]); ctx.strokeStyle="rgba(0,210,255,0.4)"; ctx.beginPath(); ctx.moveTo(this.ball.x, this.ball.y); ctx.lineTo(this.mouseX, this.mouseY); ctx.stroke(); ctx.setLineDash([]); }
+            }
+            loop() { this.update(); this.draw(); requestAnimationFrame(() => this.loop()); }
+        }
+        new GameApp();
+    </script>
+</body>
+</html>
